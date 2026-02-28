@@ -33,13 +33,20 @@ Chart.register(
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:3000";
 const MAX_SECOND_CANDLES = 240;
 const MAX_MINUTE_CANDLES = 320;
+const SECOND_CANDLE_INTERVAL_MS = 10_000;
 const MIN_BUYER_BTC = 0.1;
 const MAX_TOP_BUYERS_FEED = 20;
 const SECONDARY_COINS_VISIBLE = 6;
 const CHART_RENDER_INTERVAL_MS = 120;
 const PRICE_STATE_INTERVAL_MS = 120;
 const DATA_STALE_MS = 8000;
-const BUYER_SOUND_TIERS = [0.1, 0.3, 0.5, 0.8, 1.0];
+const BUYER_SOUND_MIN_INTERVAL_MS = 2000;
+const BUYER_SOUND_DEFAULT_TIER = 0;
+const BUYER_SOUND_DEFAULT_VOLUME = 0.22;
+const BUYER_TING_NOTIONAL_USD = 50000;
+const BUYER_TING_FILE = "/sounds/buyer-ting.wav";
+const BUYER_SOUND_TIERS = [0.3, 0.5, 0.8, 1.0, 1.5];
+const LIQUIDATION_MIN_NOTIONAL = 100000;
 const BUYER_SOUND_FILES = [
   "/sounds/buyer-tier-1.wav",
   "/sounds/buyer-tier-2.wav",
@@ -48,6 +55,61 @@ const BUYER_SOUND_FILES = [
   "/sounds/buyer-tier-5.wav"
 ];
 
+const livePriceLinePlugin = {
+  id: "livePriceLine",
+  afterDatasetsDraw(chart) {
+    const candleDs = chart?.data?.datasets?.[0];
+    const last = candleDs?.data?.[candleDs.data.length - 1];
+    const yScale = chart?.scales?.y;
+    if (!last || !yScale) {
+      return;
+    }
+
+    const price = Number(last.c);
+    if (!Number.isFinite(price)) {
+      return;
+    }
+
+    const { ctx, chartArea } = chart;
+    const y = yScale.getPixelForValue(price);
+    const up = Number(last.c) >= Number(last.o);
+    const lineColor = up ? "rgba(39, 216, 148, 0.85)" : "rgba(255, 56, 95, 0.85)";
+    const labelBg = up ? "rgba(39, 216, 148, 0.18)" : "rgba(255, 56, 95, 0.2)";
+
+    ctx.save();
+    ctx.setLineDash([6, 4]);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = lineColor;
+    ctx.beginPath();
+    ctx.moveTo(chartArea.left, y);
+    ctx.lineTo(chartArea.right, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    const text = formatPrice(price);
+    ctx.font = "700 11px Manrope, sans-serif";
+    const textWidth = ctx.measureText(text).width;
+    const padX = 7;
+    const boxW = textWidth + padX * 2;
+    const boxH = 20;
+    const boxX = chartArea.right - boxW - 2;
+    const boxY = Math.max(chartArea.top + 2, Math.min(y - boxH / 2, chartArea.bottom - boxH - 2));
+
+    ctx.fillStyle = labelBg;
+    ctx.fillRect(boxX, boxY, boxW, boxH);
+    ctx.strokeStyle = lineColor;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(boxX, boxY, boxW, boxH);
+
+    ctx.fillStyle = "#f8fbff";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, boxX + padX, boxY + boxH / 2);
+    ctx.restore();
+  }
+};
+
+Chart.register(livePriceLinePlugin);
+
 function formatPrice(value) {
   if (value === null || value === undefined) {
     return "--";
@@ -55,6 +117,15 @@ function formatPrice(value) {
   return value.toLocaleString("en-US", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
+  });
+}
+
+function formatPriceNoDecimal(value) {
+  if (value === null || value === undefined) {
+    return "--";
+  }
+  return value.toLocaleString("en-US", {
+    maximumFractionDigits: 0
   });
 }
 
@@ -214,9 +285,27 @@ function upsertCandleFromKline(candles, kline, maxItems) {
     o: Number(kline.open),
     h: Number(kline.high),
     l: Number(kline.low),
-    c: Number(kline.close)
+    c: Number(kline.close),
+    v: Number(kline.volume) || 0
   };
   const next = [...candles];
+  const idx = next.findIndex((item) => item.x === point.x);
+  if (idx >= 0) {
+    next[idx] = point;
+  } else {
+    next.push(point);
+  }
+  next.sort((a, b) => a.x - b.x);
+  return next.slice(-maxItems);
+}
+
+function upsertVolumeFromKline(volumes, kline, maxItems) {
+  const point = {
+    x: Number(kline.startTime),
+    buy: Number(kline.volume) || 0,
+    sell: 0
+  };
+  const next = [...volumes];
   const idx = next.findIndex((item) => item.x === point.x);
   if (idx >= 0) {
     next[idx] = point;
@@ -257,24 +346,26 @@ function createChart(canvas, title, unit) {
           data: [],
           yAxisID: "y",
           borderColor: {
-            up: "#27d894",
-            down: "#ff385f",
-            unchanged: "#95a1bc"
+            up: "#19d3a2",
+            down: "#ff4d73",
+            unchanged: "#8a96b3"
           },
           color: {
-            up: "#27d894",
-            down: "#ff385f",
-            unchanged: "#95a1bc"
+            up: "#19d3a2",
+            down: "#ff4d73",
+            unchanged: "#8a96b3"
           },
-          borderWidth: 1.3
+          borderWidth: 1.4
         },
         {
           type: "bar",
           label: "Buy Vol",
           data: [],
           yAxisID: "yVolume",
-          backgroundColor: "rgba(39, 216, 148, 0.45)",
+          backgroundColor: "rgba(25, 211, 162, 0.55)",
           borderWidth: 0,
+          barPercentage: 0.94,
+          categoryPercentage: 1,
           parsing: false
         },
         {
@@ -282,8 +373,10 @@ function createChart(canvas, title, unit) {
           label: "Sell Vol",
           data: [],
           yAxisID: "yVolume",
-          backgroundColor: "rgba(255, 56, 95, 0.45)",
+          backgroundColor: "rgba(255, 77, 115, 0.55)",
           borderWidth: 0,
+          barPercentage: 0.94,
+          categoryPercentage: 1,
           parsing: false
         }
       ]
@@ -304,41 +397,42 @@ function createChart(canvas, title, unit) {
               minute: "HH:mm"
             }
           },
-          ticks: { color: "#7f8aa8", maxTicksLimit: 12 },
-          grid: { color: "rgba(255,255,255,0.06)" }
+          ticks: { color: "#6f7f9f", maxTicksLimit: 10 },
+          grid: { color: "rgba(45, 58, 87, 0.42)" },
+          border: { color: "rgba(50, 64, 95, 0.55)" }
         },
         y: {
           position: "right",
           weight: 3,
-          ticks: { color: "#7f8aa8" },
-          grid: { color: "rgba(255,255,255,0.08)" }
+          ticks: { color: "#7f8aa8", maxTicksLimit: 8 },
+          grid: { color: "rgba(45, 58, 87, 0.42)" },
+          border: { color: "rgba(50, 64, 95, 0.55)" }
         },
         yVolume: {
           position: "right",
           weight: 1,
+          beginAtZero: true,
           ticks: {
-            color: "#69738f",
-            callback: (value) => Math.abs(value)
+            color: "#607091",
+            maxTicksLimit: 3
           },
-          grid: { color: "rgba(255,255,255,0.04)" }
+          grid: { color: "rgba(45, 58, 87, 0.22)" },
+          border: { color: "rgba(50, 64, 95, 0.45)" }
         }
       },
       plugins: {
+        livePriceLine: {},
         legend: {
-          labels: {
-            color: "#a4aec7",
-            usePointStyle: true,
-            boxWidth: 8
-          }
+          display: false
         },
         tooltip: {
           mode: "index",
           intersect: false,
-          backgroundColor: "#101421",
-          borderColor: "rgba(255,255,255,0.2)",
+          backgroundColor: "rgba(11, 16, 28, 0.94)",
+          borderColor: "rgba(93, 118, 173, 0.5)",
           borderWidth: 1,
-          titleColor: "#eef2ff",
-          bodyColor: "#cbd5e1"
+          titleColor: "#eef3ff",
+          bodyColor: "#d5def1"
         }
       }
     }
@@ -364,6 +458,7 @@ function App() {
   const lastHistoryPollRef = useRef(0);
   const alertAudioMapRef = useRef(new Map());
   const fallbackAudioCtxRef = useRef(null);
+  const audioUnlockedRef = useRef(false);
   const lastBuyerAlertAtRef = useRef(0);
   const buyerQueueRef = useRef([]);
   const buyerDrainTimerRef = useRef(null);
@@ -386,7 +481,6 @@ function App() {
   const [fearGreed, setFearGreed] = useState(null);
   const [newsItems, setNewsItems] = useState([]);
   const [displayNewsItems, setDisplayNewsItems] = useState([]);
-  const [secondaryCoinOffset, setSecondaryCoinOffset] = useState(0);
   const [newsAnimMode, setNewsAnimMode] = useState(0);
   const [topBuyersPulse, setTopBuyersPulse] = useState(false);
   const [liquidationsPulse, setLiquidationsPulse] = useState(false);
@@ -432,11 +526,9 @@ function App() {
   );
   const secondaryCoinsChanged = secondaryCoinsAll.filter((item) => item.changed);
   const secondaryCoins = secondaryCoinsChanged.length > 0 ? secondaryCoinsChanged : secondaryCoinsAll;
-  const secondaryCoinsVisible = getRotatingSlice(
-    secondaryCoins,
-    secondaryCoinOffset,
-    SECONDARY_COINS_VISIBLE
-  );
+  const marqueeCoins = secondaryCoins.length > 0
+    ? secondaryCoins
+    : getRotatingSlice(secondaryCoinsAll, 0, SECONDARY_COINS_VISIBLE);
 
   useEffect(() => {
     const nextMap = new Map();
@@ -446,21 +538,44 @@ function App() {
       nextMap.set(idx, audio);
     });
     alertAudioMapRef.current = nextMap;
+
+    const unlockAudio = () => {
+      audioUnlockedRef.current = true;
+      if (fallbackAudioCtxRef.current?.state === "suspended") {
+        fallbackAudioCtxRef.current.resume().catch(() => {});
+      }
+
+      alertAudioMapRef.current.forEach((audio) => {
+        audio.muted = true;
+        const promise = audio.play();
+        if (promise?.then) {
+          promise
+            .then(() => {
+              audio.pause();
+              audio.currentTime = 0;
+              audio.muted = false;
+            })
+            .catch(() => {
+              audio.muted = false;
+            });
+        } else {
+          audio.muted = false;
+        }
+      });
+    };
+
+    window.addEventListener("pointerdown", unlockAudio);
+    window.addEventListener("keydown", unlockAudio);
+    window.addEventListener("touchstart", unlockAudio);
+
     return () => {
+      window.removeEventListener("pointerdown", unlockAudio);
+      window.removeEventListener("keydown", unlockAudio);
+      window.removeEventListener("touchstart", unlockAudio);
       alertAudioMapRef.current.forEach((audio) => audio.pause());
       alertAudioMapRef.current.clear();
     };
   }, []);
-
-  useEffect(() => {
-    if (secondaryCoins.length === 0) {
-      return undefined;
-    }
-    const timer = setInterval(() => {
-      setSecondaryCoinOffset((prev) => (prev + SECONDARY_COINS_VISIBLE) % secondaryCoins.length);
-    }, 10_000);
-    return () => clearInterval(timer);
-  }, [secondaryCoins.length]);
 
   useEffect(() => {
     setDisplayNewsItems(shuffleNewsWithDiff(newsItems, displayNewsItems));
@@ -541,40 +656,66 @@ function App() {
     };
   }, []);
 
+  const playFallbackTone = (volume) => {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) {
+      return;
+    }
+    if (!fallbackAudioCtxRef.current) {
+      fallbackAudioCtxRef.current = new AudioCtx();
+    }
+    const ctx = fallbackAudioCtxRef.current;
+    if (ctx.state === "suspended" && audioUnlockedRef.current) {
+      ctx.resume().catch(() => {});
+    }
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "triangle";
+    osc.frequency.setValueAtTime(920, now);
+    osc.frequency.exponentialRampToValueAtTime(1420, now + 0.09);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(volume, now + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.2);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.2);
+  };
+
   const playBuyerTing = (tierIndex, volume) => {
     try {
       const base = alertAudioMapRef.current.get(tierIndex);
       if (base) {
-        const clip = base.cloneNode();
+        const clip = new Audio(base.src || BUYER_SOUND_FILES[tierIndex] || BUYER_SOUND_FILES[0]);
+        clip.preload = "auto";
         clip.volume = Math.max(0.03, Math.min(1, volume));
-        clip.play().catch(() => {});
+        const promise = clip.play();
+        if (promise?.then) {
+          promise.catch(() => {
+            playFallbackTone(volume);
+          });
+        }
         return;
       }
-
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      if (!AudioCtx) {
-        return;
-      }
-      if (!fallbackAudioCtxRef.current) {
-        fallbackAudioCtxRef.current = new AudioCtx();
-      }
-      const ctx = fallbackAudioCtxRef.current;
-      const now = ctx.currentTime;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = "triangle";
-      osc.frequency.setValueAtTime(920, now);
-      osc.frequency.exponentialRampToValueAtTime(1420, now + 0.09);
-      gain.gain.setValueAtTime(0.0001, now);
-      gain.gain.exponentialRampToValueAtTime(volume, now + 0.01);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.2);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(now);
-      osc.stop(now + 0.2);
+      playFallbackTone(volume);
     } catch (_error) {
-      // no-op
+      playFallbackTone(volume);
     }
+  };
+
+  const playBuyerDoubleTing = (volume = 0.3) => {
+    const v = Math.max(0.06, Math.min(1, volume));
+    const playOne = () => {
+      const clip = new Audio(BUYER_TING_FILE);
+      clip.preload = "auto";
+      clip.volume = v;
+      clip.play().catch(() => {
+        playFallbackTone(v);
+      });
+    };
+    playOne();
+    setTimeout(playOne, 180);
   };
 
   const pulseTopBuyersPanel = () => {
@@ -636,15 +777,15 @@ function App() {
   const pushBuyerRowToFeed = (row) => {
     const now = Date.now();
     const key = buyerKey(row);
+    const notional = Number(row?.notional) || 0;
 
-    const btcSize = Number(row.size) || 0;
-      if (now - lastBuyerAlertAtRef.current > 600) {
-      const tierIndex = getBuyerTierIndex(btcSize);
-      const volume = getVolumeByBtcSize(btcSize);
-      if (tierIndex >= 0 && volume > 0) {
-        playBuyerTing(tierIndex, volume);
-        lastBuyerAlertAtRef.current = now;
+    if (now - lastBuyerAlertAtRef.current >= BUYER_SOUND_MIN_INTERVAL_MS) {
+      if (notional > BUYER_TING_NOTIONAL_USD) {
+        playBuyerDoubleTing(0.32);
+      } else {
+        playBuyerTing(BUYER_SOUND_DEFAULT_TIER, BUYER_SOUND_DEFAULT_VOLUME);
       }
+      lastBuyerAlertAtRef.current = now;
     }
 
     setTopBuyers((prev) => {
@@ -747,7 +888,7 @@ function App() {
     }
 
     secondChartRef.current = createChart(secondCanvasRef.current, "10s", "second");
-    minuteChartRef.current = createChart(minuteCanvasRef.current, "15m", "minute");
+    minuteChartRef.current = createChart(minuteCanvasRef.current, "1m", "minute");
 
     return () => {
       secondChartRef.current?.destroy();
@@ -766,7 +907,7 @@ function App() {
       const volumes = secondDataRef.current.volumes;
       secondChartRef.current.data.datasets[0].data = candles;
       secondChartRef.current.data.datasets[1].data = volumes.map((v) => ({ x: v.x, y: v.buy }));
-      secondChartRef.current.data.datasets[2].data = volumes.map((v) => ({ x: v.x, y: -v.sell }));
+      secondChartRef.current.data.datasets[2].data = volumes.map((v) => ({ x: v.x, y: v.sell }));
       secondChartRef.current.update("none");
       pendingSecondRenderRef.current = false;
     };
@@ -779,7 +920,7 @@ function App() {
       const volumes = minuteDataRef.current.volumes;
       minuteChartRef.current.data.datasets[0].data = candles;
       minuteChartRef.current.data.datasets[1].data = volumes.map((v) => ({ x: v.x, y: v.buy }));
-      minuteChartRef.current.data.datasets[2].data = volumes.map((v) => ({ x: v.x, y: -v.sell }));
+      minuteChartRef.current.data.datasets[2].data = volumes.map((v) => ({ x: v.x, y: v.sell }));
       minuteChartRef.current.update("none");
       const lastVol = volumes[volumes.length - 1];
       setLastBuyVolume(lastVol?.buy ?? 0);
@@ -811,12 +952,11 @@ function App() {
           o: Number(k.open),
           h: Number(k.high),
           l: Number(k.low),
-          c: Number(k.close)
+          c: Number(k.close),
+          v: Number(k.volume) || 0
         }));
       minuteDataRef.current.candles = candles;
-      if (minuteDataRef.current.volumes.length === 0) {
-        minuteDataRef.current.volumes = candles.map((c) => ({ x: c.x, buy: 0, sell: 0 }));
-      }
+      minuteDataRef.current.volumes = candles.map((c) => ({ x: c.x, buy: c.v || 0, sell: 0 }));
       pendingMinuteRenderRef.current = true;
       const last = candles[candles.length - 1];
       if (last) {
@@ -827,6 +967,11 @@ function App() {
     const onKline = (kline) => {
       minuteDataRef.current.candles = upsertCandleFromKline(
         minuteDataRef.current.candles,
+        kline,
+        MAX_MINUTE_CANDLES
+      );
+      minuteDataRef.current.volumes = upsertVolumeFromKline(
+        minuteDataRef.current.volumes,
         kline,
         MAX_MINUTE_CANDLES
       );
@@ -842,30 +987,16 @@ function App() {
       secondDataRef.current.candles = upsertCandleFromTrade(
         secondDataRef.current.candles,
         trade,
-        1_000,
+        SECOND_CANDLE_INTERVAL_MS,
         MAX_SECOND_CANDLES
       );
       secondDataRef.current.volumes = upsertVolume(
         secondDataRef.current.volumes,
         trade,
-        1_000,
+        SECOND_CANDLE_INTERVAL_MS,
         MAX_SECOND_CANDLES
       );
       pendingSecondRenderRef.current = true;
-
-      minuteDataRef.current.candles = upsertCandleFromTrade(
-        minuteDataRef.current.candles,
-        trade,
-        60_000,
-        MAX_MINUTE_CANDLES
-      );
-      minuteDataRef.current.volumes = upsertVolume(
-        minuteDataRef.current.volumes,
-        trade,
-        60_000,
-        MAX_MINUTE_CANDLES
-      );
-      pendingMinuteRenderRef.current = true;
       lastDataAtRef.current = Date.now();
     };
 
@@ -954,7 +1085,7 @@ function App() {
       const volumes = secondDataRef.current.volumes;
       secondChartRef.current.data.datasets[0].data = candles;
       secondChartRef.current.data.datasets[1].data = volumes.map((v) => ({ x: v.x, y: v.buy }));
-      secondChartRef.current.data.datasets[2].data = volumes.map((v) => ({ x: v.x, y: -v.sell }));
+      secondChartRef.current.data.datasets[2].data = volumes.map((v) => ({ x: v.x, y: v.sell }));
       secondChartRef.current.update("none");
     };
 
@@ -966,7 +1097,7 @@ function App() {
       const volumes = minuteDataRef.current.volumes;
       minuteChartRef.current.data.datasets[0].data = candles;
       minuteChartRef.current.data.datasets[1].data = volumes.map((v) => ({ x: v.x, y: v.buy }));
-      minuteChartRef.current.data.datasets[2].data = volumes.map((v) => ({ x: v.x, y: -v.sell }));
+      minuteChartRef.current.data.datasets[2].data = volumes.map((v) => ({ x: v.x, y: v.sell }));
       minuteChartRef.current.update("none");
       const lastVol = volumes[volumes.length - 1];
       setLastBuyVolume(lastVol?.buy ?? 0);
@@ -1012,15 +1143,14 @@ function App() {
           o: Number(k.open),
           h: Number(k.high),
           l: Number(k.low),
-          c: Number(k.close)
+          c: Number(k.close),
+          v: Number(k.volume) || 0
         }));
-        if (minuteDataRef.current.volumes.length === 0) {
-          minuteDataRef.current.volumes = minuteDataRef.current.candles.map((c) => ({
-            x: c.x,
-            buy: 0,
-            sell: 0
-          }));
-        }
+        minuteDataRef.current.volumes = minuteDataRef.current.candles.map((c) => ({
+          x: c.x,
+          buy: c.v || 0,
+          sell: 0
+        }));
         pendingMinuteRenderRef.current = true;
         renderMinuteChartFallback();
       } catch (_error) {
@@ -1113,7 +1243,9 @@ function App() {
   const topMaxNotional = topBuyers.length
     ? Math.max(...topBuyers.map((item) => Number(item.notional) || 0))
     : 0;
-  const liquidationsVisible = liquidations.slice(0, 14);
+  const liquidationsVisible = liquidations
+    .filter((item) => Number(item?.notional) >= LIQUIDATION_MIN_NOTIONAL)
+    .slice(0, 14);
   const topLiqMaxNotional = liquidationsVisible.length
     ? Math.max(...liquidationsVisible.map((item) => Number(item.notional) || 0))
     : 0;
@@ -1123,7 +1255,7 @@ function App() {
       <div className="ticker-strip">
         <div className="btc-block">
           <span className={`btc-head btc-${priceTrend} ${btcFlash ? `btc-flash-${btcFlash}` : ""}`}>
-            BTC: {formatPrice(price)}
+            BTC: {formatPriceNoDecimal(price)}
           </span>
           <b className={(btcTicker?.changePercent ?? 0) >= 0 ? "green" : "red"}>
             {(btcTicker?.changePercent ?? 0) >= 0 ? "+" : ""}
@@ -1132,7 +1264,7 @@ function App() {
         </div>
         <div className="ticker-marquee">
           <div className="ticker-marquee-track">
-            {secondaryCoinsVisible.map((m) => (
+            {marqueeCoins.map((m) => (
               <span
                 className={`ticker-item ${
                   m.updateDirection === "up" ? "ticker-up" : m.updateDirection === "down" ? "ticker-down" : ""
@@ -1146,7 +1278,7 @@ function App() {
                 </b>
               </span>
             ))}
-            {secondaryCoinsVisible.map((m) => (
+            {marqueeCoins.map((m) => (
               <span
                 className={`ticker-item ${
                   m.updateDirection === "up" ? "ticker-up" : m.updateDirection === "down" ? "ticker-down" : ""
@@ -1177,7 +1309,7 @@ function App() {
           </section>
 
           <section className="chart-card">
-            <div className="chart-label">15m</div>
+            <div className="chart-label">1m</div>
             <canvas ref={minuteCanvasRef} />
           </section>
         </main>
@@ -1215,7 +1347,7 @@ function App() {
           </div>
 
           <div className={`stream-panel ${liquidationsPulse ? "panel-pulse panel-pulse-liq" : ""}`}>
-            <div className="panel-title">LIQUIDATIONS</div>
+            <div className="panel-title">LIQUIDATIONS &gt; 100K USD</div>
             <div className="rows">
               {liquidationsVisible.map((row, idx) => {
                 const intensity = topLiqMaxNotional > 0 ? Number(row.notional) / topLiqMaxNotional : 0;

@@ -9,11 +9,14 @@ const SYMBOL = "BTCUSDT";
 const SYMBOL_LOWER = SYMBOL.toLowerCase();
 const BINANCE_WS_URL = `wss://stream.binance.com:9443/stream?streams=${SYMBOL_LOWER}@trade/${SYMBOL_LOWER}@kline_1m`;
 const BINANCE_FORCE_WS_URL = "wss://fstream.binance.com/ws/btcusdt@forceOrder";
+const BYBIT_LIQUIDATION_WS_URL = "wss://stream.bybit.com/v5/public/linear";
+const OKX_LIQUIDATION_WS_URL = "wss://ws.okx.com:8443/ws/v5/public";
 const BINANCE_KLINE_REST_URL = `https://api.binance.com/api/v3/klines?symbol=${SYMBOL}&interval=1m&limit=200`;
 const MAX_CANDLES = 200;
 const TOP_BUYERS_LIMIT = 12;
 const MIN_TOP_BUYER_BTC = 0.1;
 const MAX_LIQUIDATIONS = 30;
+const MIN_LIQUIDATION_NOTIONAL_USD = 100_000;
 const TOP_BUYERS_REFRESH_MS = 3_000;
 const MARKETS_REFRESH_MS = 10_000;
 const FEAR_REFRESH_MS = 60_000;
@@ -90,11 +93,23 @@ let fearGreed = null;
 /** @type {Array<{title:string,link:string,source:string,publishedAt:number}>} */
 let newsItems = [];
 let binanceSocket = null;
-let forceSocket = null;
+let forceSockets = {
+  binance: null,
+  bybit: null,
+  okx: null
+};
 let reconnectAttempt = 0;
 let reconnectTimer = null;
-let forceReconnectAttempt = 0;
-let forceReconnectTimer = null;
+let forceReconnectAttempts = {
+  binance: 0,
+  bybit: 0,
+  okx: 0
+};
+let forceReconnectTimers = {
+  binance: null,
+  bybit: null,
+  okx: null
+};
 let historySyncTimer = null;
 let secondHeartbeatTimer = null;
 let topBuyersTimer = null;
@@ -466,20 +481,34 @@ function startFearGreedSync() {
 }
 
 function decodeXmlEntities(value) {
-  return String(value || "")
+  const decoded = String(value || "")
     .replace(/<!\[CDATA\[(.*?)\]\]>/g, "$1")
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, "\"")
-    .replace(/&#39;/g, "'");
+    .replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(Number(dec)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)));
+
+  return decoded;
+}
+
+function stripHtmlTags(value) {
+  return String(value || "").replace(/<[^>]*>/g, " ");
+}
+
+function normalizeHeadlineText(value) {
+  return stripHtmlTags(decodeXmlEntities(value))
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function parseRssItems(xml, source) {
   const items = [];
   const itemRegex = /<item\b[\s\S]*?<\/item>/gi;
   const entryRegex = /<entry\b[\s\S]*?<\/entry>/gi;
-  const titleRegex = /<title>([\s\S]*?)<\/title>/i;
+  const titleRegex = /<title\b[^>]*>([\s\S]*?)<\/title>/i;
   const linkRegex = /<link>([\s\S]*?)<\/link>/i;
   const atomLinkRegex = /<link\b[^>]*href=["']([^"']+)["'][^>]*\/?>/i;
   const dateRegex = /<pubDate>([\s\S]*?)<\/pubDate>/i;
@@ -489,7 +518,7 @@ function parseRssItems(xml, source) {
   let match;
   while ((match = itemRegex.exec(xml)) !== null) {
     const block = match[0];
-    const title = decodeXmlEntities(block.match(titleRegex)?.[1] || "").trim();
+    const title = normalizeHeadlineText(block.match(titleRegex)?.[1] || "");
     const link = decodeXmlEntities(block.match(linkRegex)?.[1] || "").trim();
     const dateStr = decodeXmlEntities(block.match(dateRegex)?.[1] || "").trim();
     const publishedAt = Date.parse(dateStr);
@@ -501,7 +530,7 @@ function parseRssItems(xml, source) {
 
   while ((match = entryRegex.exec(xml)) !== null) {
     const block = match[0];
-    const title = decodeXmlEntities(block.match(titleRegex)?.[1] || "").trim();
+    const title = normalizeHeadlineText(block.match(titleRegex)?.[1] || "");
     const link =
       decodeXmlEntities(block.match(atomLinkRegex)?.[1] || "") ||
       decodeXmlEntities(block.match(linkRegex)?.[1] || "");
@@ -603,56 +632,57 @@ function clearReconnectTimer() {
   }
 }
 
-function scheduleForceReconnect() {
-  if (isShuttingDown || forceReconnectTimer) {
+function scheduleForceReconnect(exchangeId) {
+  if (isShuttingDown || forceReconnectTimers[exchangeId]) {
     return;
   }
 
-  forceReconnectAttempt += 1;
+  forceReconnectAttempts[exchangeId] += 1;
   const delay = Math.min(
-    RECONNECT_BASE_DELAY_MS * 2 ** Math.max(0, forceReconnectAttempt - 1),
+    RECONNECT_BASE_DELAY_MS * 2 ** Math.max(0, forceReconnectAttempts[exchangeId] - 1),
     RECONNECT_MAX_DELAY_MS
   );
 
-  forceReconnectTimer = setTimeout(() => {
-    forceReconnectTimer = null;
-    connectForceWebSocket();
+  forceReconnectTimers[exchangeId] = setTimeout(() => {
+    forceReconnectTimers[exchangeId] = null;
+    connectForceWebSocket(exchangeId);
   }, delay);
 }
 
-function clearForceReconnectTimer() {
-  if (forceReconnectTimer) {
-    clearTimeout(forceReconnectTimer);
-    forceReconnectTimer = null;
+function clearForceReconnectTimer(exchangeId) {
+  if (forceReconnectTimers[exchangeId]) {
+    clearTimeout(forceReconnectTimers[exchangeId]);
+    forceReconnectTimers[exchangeId] = null;
   }
 }
 
 function pushLiquidation(item) {
+  if ((item?.notional || 0) < MIN_LIQUIDATION_NOTIONAL_USD) {
+    return;
+  }
   liquidations = [item, ...liquidations].slice(0, MAX_LIQUIDATIONS);
   io.emit("liquidation", item);
 }
 
-function connectForceWebSocket() {
+function connectBinanceForceWebSocket() {
   if (isShuttingDown) {
     return;
   }
 
-  if (
-    forceSocket &&
-    (forceSocket.readyState === WebSocket.OPEN || forceSocket.readyState === WebSocket.CONNECTING)
-  ) {
+  const existing = forceSockets.binance;
+  if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) {
     return;
   }
 
-  clearForceReconnectTimer();
-  forceSocket = new WebSocket(BINANCE_FORCE_WS_URL);
+  clearForceReconnectTimer("binance");
+  forceSockets.binance = new WebSocket(BINANCE_FORCE_WS_URL);
 
-  forceSocket.on("open", () => {
-    forceReconnectAttempt = 0;
+  forceSockets.binance.on("open", () => {
+    forceReconnectAttempts.binance = 0;
     console.log("Connected to Binance forceOrder WS.");
   });
 
-  forceSocket.on("message", (rawData) => {
+  forceSockets.binance.on("message", (rawData) => {
     try {
       const payload = JSON.parse(rawData.toString());
       const order = payload?.o;
@@ -683,14 +713,185 @@ function connectForceWebSocket() {
     }
   });
 
-  forceSocket.on("error", (error) => {
+  forceSockets.binance.on("error", (error) => {
     console.error("forceOrder WS error:", error.message);
   });
 
-  forceSocket.on("close", () => {
-    forceSocket = null;
-    scheduleForceReconnect();
+  forceSockets.binance.on("close", () => {
+    forceSockets.binance = null;
+    scheduleForceReconnect("binance");
   });
+}
+
+function pickFirstNumber(...values) {
+  for (const value of values) {
+    const n = toNumber(value);
+    if (n > 0) {
+      return n;
+    }
+  }
+  return 0;
+}
+
+function connectBybitForceWebSocket() {
+  if (isShuttingDown) {
+    return;
+  }
+
+  const existing = forceSockets.bybit;
+  if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+
+  clearForceReconnectTimer("bybit");
+  forceSockets.bybit = new WebSocket(BYBIT_LIQUIDATION_WS_URL);
+
+  forceSockets.bybit.on("open", () => {
+    forceReconnectAttempts.bybit = 0;
+    forceSockets.bybit.send(
+      JSON.stringify({
+        op: "subscribe",
+        args: ["liquidation.BTCUSDT"]
+      })
+    );
+    console.log("Connected to Bybit liquidation WS.");
+  });
+
+  forceSockets.bybit.on("message", (rawData) => {
+    try {
+      const payload = JSON.parse(rawData.toString());
+      if (!String(payload?.topic || "").startsWith("liquidation.")) {
+        return;
+      }
+
+      const rows = Array.isArray(payload?.data) ? payload.data : payload?.data ? [payload.data] : [];
+      rows.forEach((entry) => {
+        const price = pickFirstNumber(entry.p, entry.price);
+        const qty = pickFirstNumber(entry.v, entry.size, entry.qty, entry.q);
+        const ts = pickFirstNumber(entry.T, entry.ts, payload.ts) || Date.now();
+        if (price <= 0 || qty <= 0) {
+          return;
+        }
+        const sideText = String(entry.S || entry.side || "").toUpperCase();
+        const side = sideText === "SELL" ? "sell" : "buy";
+        pushLiquidation({
+          exchange: "Bybit",
+          exchangeId: "bybit",
+          logoUrl: "/exchange-logos/bybit.svg",
+          symbol: entry.s || "BTCUSDT",
+          side,
+          price,
+          qty,
+          notional: price * qty,
+          ts
+        });
+      });
+    } catch (error) {
+      console.error("Failed to parse Bybit liquidation message:", error.message);
+    }
+  });
+
+  forceSockets.bybit.on("error", (error) => {
+    console.error("Bybit liquidation WS error:", error.message);
+  });
+
+  forceSockets.bybit.on("close", () => {
+    forceSockets.bybit = null;
+    scheduleForceReconnect("bybit");
+  });
+}
+
+function connectOkxForceWebSocket() {
+  if (isShuttingDown) {
+    return;
+  }
+
+  const existing = forceSockets.okx;
+  if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+
+  clearForceReconnectTimer("okx");
+  forceSockets.okx = new WebSocket(OKX_LIQUIDATION_WS_URL);
+
+  forceSockets.okx.on("open", () => {
+    forceReconnectAttempts.okx = 0;
+    forceSockets.okx.send(
+      JSON.stringify({
+        op: "subscribe",
+        args: [{ channel: "liquidation-orders", instType: "SWAP", instFamily: "BTC-USDT" }]
+      })
+    );
+    console.log("Connected to OKX liquidation WS.");
+  });
+
+  forceSockets.okx.on("message", (rawData) => {
+    try {
+      const payload = JSON.parse(rawData.toString());
+      if (payload?.event) {
+        return;
+      }
+      if (payload?.arg?.channel !== "liquidation-orders") {
+        return;
+      }
+
+      const rows = [];
+      const data = Array.isArray(payload?.data) ? payload.data : [];
+      data.forEach((item) => {
+        if (Array.isArray(item?.details)) {
+          item.details.forEach((d) => rows.push({ ...d, instId: item.instId, ts: item.ts || d.ts }));
+          return;
+        }
+        rows.push(item);
+      });
+
+      rows.forEach((entry) => {
+        const price = pickFirstNumber(entry.bkPx, entry.px, entry.fillPx, entry.price);
+        const qty = pickFirstNumber(entry.sz, entry.qty, entry.size, entry.bkSz);
+        const notional = pickFirstNumber(entry.notionalUsd, entry.usdSz, price * qty);
+        const ts = pickFirstNumber(entry.ts, payload?.ts) || Date.now();
+        if (price <= 0 || qty <= 0 || notional <= 0) {
+          return;
+        }
+        const sideText = String(entry.side || entry.S || "").toUpperCase();
+        const side = sideText === "SELL" ? "sell" : "buy";
+        pushLiquidation({
+          exchange: "OKX",
+          exchangeId: "okx",
+          logoUrl: "/exchange-logos/okx.svg",
+          symbol: entry.instId || "BTC-USDT-SWAP",
+          side,
+          price,
+          qty,
+          notional,
+          ts
+        });
+      });
+    } catch (error) {
+      console.error("Failed to parse OKX liquidation message:", error.message);
+    }
+  });
+
+  forceSockets.okx.on("error", (error) => {
+    console.error("OKX liquidation WS error:", error.message);
+  });
+
+  forceSockets.okx.on("close", () => {
+    forceSockets.okx = null;
+    scheduleForceReconnect("okx");
+  });
+}
+
+function connectForceWebSocket(exchangeId) {
+  if (exchangeId === "bybit") {
+    connectBybitForceWebSocket();
+    return;
+  }
+  if (exchangeId === "okx") {
+    connectOkxForceWebSocket();
+    return;
+  }
+  connectBinanceForceWebSocket();
 }
 
 function connectBinanceWebSocket() {
@@ -812,7 +1013,12 @@ app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
     binanceWsConnected: binanceSocket?.readyState === WebSocket.OPEN,
-    forceWsConnected: forceSocket?.readyState === WebSocket.OPEN,
+    forceWsConnected: Object.values(forceSockets).some((ws) => ws?.readyState === WebSocket.OPEN),
+    forceWs: {
+      binance: forceSockets.binance?.readyState === WebSocket.OPEN,
+      bybit: forceSockets.bybit?.readyState === WebSocket.OPEN,
+      okx: forceSockets.okx?.readyState === WebSocket.OPEN
+    },
     candles: candles.length,
     latestSecondPrice,
     topBuyersUpdatedAt,
@@ -888,7 +1094,9 @@ function shutdown(signal) {
   isShuttingDown = true;
   console.log(`Received ${signal}. Shutting down...`);
   clearReconnectTimer();
-  clearForceReconnectTimer();
+  clearForceReconnectTimer("binance");
+  clearForceReconnectTimer("bybit");
+  clearForceReconnectTimer("okx");
 
   if (historySyncTimer) {
     clearInterval(historySyncTimer);
@@ -924,13 +1132,18 @@ function shutdown(signal) {
       // no-op
     }
   }
-  if (forceSocket) {
+  Object.keys(forceSockets).forEach((key) => {
+    const socket = forceSockets[key];
+    if (!socket) {
+      return;
+    }
     try {
-      forceSocket.terminate();
+      socket.terminate();
     } catch (_error) {
       // no-op
     }
-  }
+    forceSockets[key] = null;
+  });
 
   io.close(() => {
     httpServer.close(() => process.exit(0));
@@ -945,7 +1158,9 @@ httpServer.listen(PORT, async () => {
   console.log(`Server running on http://localhost:${PORT}`);
   await syncMinuteHistory(true);
   connectBinanceWebSocket();
-  connectForceWebSocket();
+  connectForceWebSocket("binance");
+  connectForceWebSocket("bybit");
+  connectForceWebSocket("okx");
   startSecondHeartbeat();
   startTopBuyersSync();
   startMarketsSync();

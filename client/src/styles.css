@@ -91,8 +91,10 @@ body {
   gap: 24px;
   width: max-content;
   padding-right: 24px;
-  animation: ticker-scroll 40s linear infinite;
+  animation: ticker-scroll 56s linear infinite;
   will-change: transform;
+  transform: translate3d(0, 0, 0);
+  backface-visibility: hidden;
 }
 
 .ticker-item {
@@ -120,10 +122,10 @@ body {
 
 @keyframes ticker-scroll {
   0% {
-    transform: translateX(0);
+    transform: translate3d(0, 0, 0);
   }
   100% {
-    transform: translateX(-50%);
+    transform: translate3d(-50%, 0, 0);
   }
 }
 
@@ -212,9 +214,10 @@ body {
 .chart-card {
   position: relative;
   border: 1px solid var(--line);
-  background: var(--panel);
+  background:
+    linear-gradient(180deg, rgba(17, 24, 39, 0.98), rgba(13, 18, 31, 0.98));
   border-radius: 4px;
-  padding: 10px;
+  padding: 8px;
   min-height: 0;
   overflow: hidden;
 }
@@ -222,12 +225,18 @@ body {
 .chart-label {
   position: absolute;
   left: 10px;
-  bottom: 8px;
+  top: 8px;
   z-index: 2;
-  font-size: clamp(2.1rem, 1.6rem + 1.8vw, 3.2rem);
-  font-weight: 800;
-  color: #f1f4ff;
-  opacity: 0.92;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #a7b5d7;
+  opacity: 0.95;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: rgba(10, 14, 24, 0.66);
+  border: 1px solid rgba(71, 92, 138, 0.35);
+  padding: 2px 8px;
+  border-radius: 4px;
 }
 
 .chart-card canvas {
@@ -350,8 +359,8 @@ body {
 }
 
 .buyer-row {
-  grid-template-columns: 20px 110px 92px 110px;
-  justify-items: center;
+  grid-template-columns: 16px minmax(78px, 1fr) minmax(70px, 0.9fr) minmax(78px, 1fr);
+  justify-items: stretch;
   text-align: center;
   background: linear-gradient(
     90deg,
@@ -380,6 +389,12 @@ body {
   font-weight: 700;
   color: #ffd7de;
   font-variant-numeric: tabular-nums;
+  width: 100%;
+  min-width: 0;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .row-hot {
@@ -410,13 +425,23 @@ body {
   font-family: var(--font-numeric);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+  width: 100%;
+  min-width: 0;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .buyer-row .price {
   font-family: var(--font-numeric);
   font-weight: 700;
   width: 100%;
+  min-width: 0;
   text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-variant-numeric: tabular-nums;
 }
 
@@ -528,6 +553,9 @@ body {
   font-size: var(--fs-xs);
   line-height: 1.35;
   font-weight: 600;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
 }
 
 .news-empty {
@@ -650,7 +678,7 @@ body {
   }
 
   .ticker-marquee-track {
-    animation-duration: 32s;
+    animation-duration: 48s;
   }
 }
 
