@@ -1,0 +1,10 @@
+{
+  "type": "rtmp_common",
+  "settings": {
+    "bwtest": false,
+    "service": "YouTube - RTMPS",
+    "server": "Primary YouTube ingest server",
+    "key": ""
+  }
+}
+

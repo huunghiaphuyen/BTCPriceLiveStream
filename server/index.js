@@ -15,11 +15,13 @@ const TOP_BUYERS_LIMIT = 12;
 const MIN_TOP_BUYER_BTC = 0.1;
 const MAX_LIQUIDATIONS = 30;
 const TOP_BUYERS_REFRESH_MS = 3_000;
-const MARKETS_REFRESH_MS = 15_000;
+const MARKETS_REFRESH_MS = 10_000;
 const FEAR_REFRESH_MS = 60_000;
+const NEWS_REFRESH_MS = 60_000;
+const NEWS_LIMIT = 10;
 const RECONNECT_BASE_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 15_000;
-const HISTORY_SYNC_MS = 15_000;
+const HISTORY_SYNC_MS = 5_000;
 const NASDAQ_100_SYMBOLS = [
   "AAPL","MSFT","NVDA","AMZN","GOOGL","GOOG","META","TSLA","AVGO","COST",
   "NFLX","ASML","AMD","PEP","ADBE","CSCO","TMUS","LIN","TXN","QCOM",
@@ -32,27 +34,34 @@ const NASDAQ_100_SYMBOLS = [
   "TEAM","DDOG","ANSS","TTWO","WBD","LULU","ZS","MDB","CCEP","CDW",
   "DXCM","TTD","ILMN","ARM","SMCI","SIRI","PDD","PYPL","AXON","ROP"
 ];
+const NEWS_FEEDS = [
+  { source: "CoinDesk", url: "https://www.coindesk.com/arc/outboundfeeds/rss/" },
+  { source: "Cointelegraph", url: "https://cointelegraph.com/rss" },
+  { source: "CNN", url: "http://rss.cnn.com/rss/edition.rss" },
+  { source: "BBC", url: "https://feeds.bbci.co.uk/news/world/rss.xml" },
+  { source: "Fox News", url: "https://moxie.foxnews.com/google-publisher/latest.xml" }
+];
 
 const EXCHANGES = [
   {
     id: "binance",
     name: "Binance",
-    logoUrl: "https://cdn.simpleicons.org/binance/F0B90B"
+    logoUrl: "/exchange-logos/binance.svg"
   },
   {
     id: "bybit",
     name: "Bybit",
-    logoUrl: "https://cdn.simpleicons.org/bybit/F7A600"
+    logoUrl: "/exchange-logos/bybit.svg"
   },
   {
     id: "okx",
     name: "OKX",
-    logoUrl: "https://cdn.simpleicons.org/okx/ffffff"
+    logoUrl: "/exchange-logos/okx.svg"
   },
   {
     id: "kucoin",
     name: "KuCoin",
-    logoUrl: "https://cdn.simpleicons.org/kucoin/14BE8A"
+    logoUrl: "/exchange-logos/kucoin.svg"
   }
 ];
 
@@ -78,6 +87,8 @@ let topBuyersUpdatedAt = null;
 let liquidations = [];
 let markets = [];
 let fearGreed = null;
+/** @type {Array<{title:string,link:string,source:string,publishedAt:number}>} */
+let newsItems = [];
 let binanceSocket = null;
 let forceSocket = null;
 let reconnectAttempt = 0;
@@ -89,6 +100,7 @@ let secondHeartbeatTimer = null;
 let topBuyersTimer = null;
 let marketsTimer = null;
 let fearTimer = null;
+let newsTimer = null;
 let lastSecondBucket = null;
 let isShuttingDown = false;
 
@@ -453,6 +465,118 @@ function startFearGreedSync() {
   }, FEAR_REFRESH_MS);
 }
 
+function decodeXmlEntities(value) {
+  return String(value || "")
+    .replace(/<!\[CDATA\[(.*?)\]\]>/g, "$1")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'");
+}
+
+function parseRssItems(xml, source) {
+  const items = [];
+  const itemRegex = /<item\b[\s\S]*?<\/item>/gi;
+  const entryRegex = /<entry\b[\s\S]*?<\/entry>/gi;
+  const titleRegex = /<title>([\s\S]*?)<\/title>/i;
+  const linkRegex = /<link>([\s\S]*?)<\/link>/i;
+  const atomLinkRegex = /<link\b[^>]*href=["']([^"']+)["'][^>]*\/?>/i;
+  const dateRegex = /<pubDate>([\s\S]*?)<\/pubDate>/i;
+  const updatedRegex = /<updated>([\s\S]*?)<\/updated>/i;
+  const publishedRegex = /<published>([\s\S]*?)<\/published>/i;
+
+  let match;
+  while ((match = itemRegex.exec(xml)) !== null) {
+    const block = match[0];
+    const title = decodeXmlEntities(block.match(titleRegex)?.[1] || "").trim();
+    const link = decodeXmlEntities(block.match(linkRegex)?.[1] || "").trim();
+    const dateStr = decodeXmlEntities(block.match(dateRegex)?.[1] || "").trim();
+    const publishedAt = Date.parse(dateStr);
+    if (!title || !link || !Number.isFinite(publishedAt)) {
+      continue;
+    }
+    items.push({ title, link, source, publishedAt });
+  }
+
+  while ((match = entryRegex.exec(xml)) !== null) {
+    const block = match[0];
+    const title = decodeXmlEntities(block.match(titleRegex)?.[1] || "").trim();
+    const link =
+      decodeXmlEntities(block.match(atomLinkRegex)?.[1] || "") ||
+      decodeXmlEntities(block.match(linkRegex)?.[1] || "");
+    const dateStr = decodeXmlEntities(
+      block.match(updatedRegex)?.[1] || block.match(publishedRegex)?.[1] || ""
+    ).trim();
+    const publishedAt = Date.parse(dateStr);
+    if (!title || !link || !Number.isFinite(publishedAt)) {
+      continue;
+    }
+    items.push({ title, link, source, publishedAt });
+  }
+
+  return items;
+}
+
+function getLatestNews(limit = NEWS_LIMIT) {
+  return newsItems.slice(0, limit);
+}
+
+async function refreshNews() {
+  try {
+    const settled = await Promise.allSettled(
+      NEWS_FEEDS.map(async (feed) => {
+        const res = await fetch(feed.url, {
+          headers: { "User-Agent": "Mozilla/5.0" }
+        });
+        if (!res.ok) {
+          throw new Error(`${feed.source} HTTP ${res.status}`);
+        }
+        const xml = await res.text();
+        return parseRssItems(xml, feed.source);
+      })
+    );
+
+    const merged = [];
+    for (const result of settled) {
+      if (result.status === "fulfilled") {
+        merged.push(...result.value);
+      }
+    }
+
+    const dedup = new Map();
+    merged.forEach((item) => {
+      const key = `${item.source}|${item.title}`;
+      const prev = dedup.get(key);
+      if (!prev || item.publishedAt > prev.publishedAt) {
+        dedup.set(key, item);
+      }
+    });
+
+    newsItems = [...dedup.values()]
+      .sort((a, b) => b.publishedAt - a.publishedAt)
+      .slice(0, 150);
+
+    io.emit("news", {
+      updatedAt: Date.now(),
+      limit: NEWS_LIMIT,
+      rows: getLatestNews(NEWS_LIMIT)
+    });
+  } catch (error) {
+    console.error("Failed to refresh news:", error.message);
+  }
+}
+
+function startNewsSync() {
+  if (newsTimer) {
+    return;
+  }
+  refreshNews();
+  newsTimer = setInterval(() => {
+    refreshNews();
+  }, NEWS_REFRESH_MS);
+}
+
 function scheduleReconnect() {
   if (isShuttingDown || reconnectTimer) {
     return;
@@ -544,6 +668,9 @@ function connectForceWebSocket() {
       }
 
       pushLiquidation({
+        exchange: "Binance",
+        exchangeId: "binance",
+        logoUrl: "/exchange-logos/binance.svg",
         symbol: order.s,
         side,
         price,
@@ -674,6 +801,11 @@ io.on("connection", (socket) => {
   if (fearGreed) {
     socket.emit("fearGreed", fearGreed);
   }
+  socket.emit("news", {
+    updatedAt: Date.now(),
+    limit: NEWS_LIMIT,
+    rows: getLatestNews(NEWS_LIMIT)
+  });
 });
 
 app.get("/health", (_req, res) => {
@@ -684,7 +816,8 @@ app.get("/health", (_req, res) => {
     candles: candles.length,
     latestSecondPrice,
     topBuyersUpdatedAt,
-    liquidations: liquidations.length
+    liquidations: liquidations.length,
+    latestNewsCount: getLatestNews(NEWS_LIMIT).length
   });
 });
 
@@ -739,6 +872,14 @@ app.get("/api/fear-greed", (_req, res) => {
   res.json(fearGreed ?? {});
 });
 
+app.get("/api/news", (_req, res) => {
+  res.json({
+    updatedAt: Date.now(),
+    limit: NEWS_LIMIT,
+    rows: getLatestNews(NEWS_LIMIT)
+  });
+});
+
 function shutdown(signal) {
   if (isShuttingDown) {
     return;
@@ -770,6 +911,10 @@ function shutdown(signal) {
   if (fearTimer) {
     clearInterval(fearTimer);
     fearTimer = null;
+  }
+  if (newsTimer) {
+    clearInterval(newsTimer);
+    newsTimer = null;
   }
 
   if (binanceSocket) {
@@ -805,6 +950,7 @@ httpServer.listen(PORT, async () => {
   startTopBuyersSync();
   startMarketsSync();
   startFearGreedSync();
+  startNewsSync();
   historySyncTimer = setInterval(() => {
     syncMinuteHistory(false);
   }, HISTORY_SYNC_MS);
