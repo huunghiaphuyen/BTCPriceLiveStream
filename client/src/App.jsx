@@ -35,6 +35,7 @@ const MAX_SECOND_CANDLES = 240;
 const MAX_MINUTE_CANDLES = 320;
 const MIN_BUYER_BTC = 0.1;
 const MAX_TOP_BUYERS_FEED = 20;
+const SECONDARY_COINS_VISIBLE = 6;
 const ALERT_BTC_LEVELS = {
   low: 0.1,
   mid: 0.5,
@@ -73,6 +74,17 @@ function formatBtc(value) {
 
 function buyerKey(row) {
   return `${row.exchangeId}|${row.price}|${row.size}`;
+}
+
+function getRotatingSlice(items, start, size) {
+  if (!Array.isArray(items) || items.length === 0 || size <= 0) {
+    return [];
+  }
+  const out = [];
+  for (let i = 0; i < Math.min(size, items.length); i += 1) {
+    out.push(items[(start + i) % items.length]);
+  }
+  return out;
 }
 
 function getVolumeByBtcSize(size) {
@@ -282,7 +294,16 @@ function App() {
   const [liquidations, setLiquidations] = useState([]);
   const [markets, setMarkets] = useState([]);
   const [fearGreed, setFearGreed] = useState(null);
+  const [secondaryCoinOffset, setSecondaryCoinOffset] = useState(0);
   const btcTicker = markets.find((item) => item.symbol === "BTC");
+  const secondaryCoins = markets.filter(
+    (item) => item.marketType === "crypto" && item.symbol !== "BTC"
+  );
+  const secondaryCoinsVisible = getRotatingSlice(
+    secondaryCoins,
+    secondaryCoinOffset,
+    SECONDARY_COINS_VISIBLE
+  );
 
   useEffect(() => {
     alertAudioRef.current = new Audio("/sounds/buyer-ting.wav");
@@ -294,6 +315,16 @@ function App() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (secondaryCoins.length === 0) {
+      return undefined;
+    }
+    const timer = setInterval(() => {
+      setSecondaryCoinOffset((prev) => (prev + SECONDARY_COINS_VISIBLE) % secondaryCoins.length);
+    }, 10_000);
+    return () => clearInterval(timer);
+  }, [secondaryCoins.length]);
 
   const playBuyerTing = (volume) => {
     try {
@@ -742,8 +773,7 @@ function App() {
             {(btcTicker?.changePercent ?? 0).toFixed(2)}%
           </b>
         </div>
-        {markets.map((m) => (
-          m.symbol === "BTC" ? null : (
+        {secondaryCoinsVisible.map((m) => (
           <span className="ticker-item" key={`${m.marketType || "m"}-${m.symbol}`}>
             {m.symbol}: {formatPrice(m.price)}{" "}
             <b className={m.changePercent >= 0 ? "green" : "red"}>
@@ -751,7 +781,6 @@ function App() {
               {m.changePercent.toFixed(2)}%
             </b>
           </span>
-          )
         ))}
       </div>
 
