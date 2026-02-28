@@ -1,0 +1,248 @@
+:root {
+  --bg: #020305;
+  --panel: #070b12;
+  --line: #1a2233;
+  --text: #f3f5fb;
+  --muted: #7a839d;
+  --green: #22d58d;
+  --red: #ff3b63;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(circle at 0 0, rgba(34, 213, 141, 0.08), transparent 25%), var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.layout {
+  width: 100%;
+}
+
+.ticker-strip {
+  height: 58px;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 0 12px;
+  overflow-x: auto;
+  border-bottom: 1px solid #101727;
+  background: #010204;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.ticker-item {
+  font-size: clamp(1rem, 1.5vw, 2rem);
+}
+
+.btc-head {
+  font-size: clamp(2rem, 4vw, 3rem);
+  line-height: 1;
+}
+
+.btc-up {
+  color: var(--green);
+}
+
+.btc-down {
+  color: var(--red);
+}
+
+.btc-neutral {
+  color: #dce3f8;
+}
+
+.green {
+  color: var(--green);
+}
+
+.red {
+  color: var(--red);
+}
+
+.page-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 8px;
+  padding: 8px;
+}
+
+.charts-col {
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  gap: 8px;
+  min-height: calc(100vh - 74px);
+}
+
+.chart-card {
+  position: relative;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 4px;
+  padding: 8px;
+}
+
+.chart-label {
+  position: absolute;
+  left: 10px;
+  bottom: 8px;
+  z-index: 2;
+  font-size: 3rem;
+  font-weight: 800;
+  color: #f1f4ff;
+  opacity: 0.92;
+}
+
+.chart-card canvas {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.fear-card {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 3;
+  border: 1px solid #1a2233;
+  background: rgba(13, 20, 34, 0.92);
+  padding: 8px 10px;
+  border-radius: 3px;
+  min-width: 170px;
+}
+
+.fear-title {
+  font-size: 0.72rem;
+  color: #b2bfdc;
+}
+
+.fear-value {
+  font-size: 1.9rem;
+  font-weight: 800;
+  color: #f2d350;
+  line-height: 1;
+}
+
+.fear-label {
+  font-size: 0.78rem;
+  color: #f0b14a;
+}
+
+.stream-col {
+  display: grid;
+  grid-template-rows: 1fr 1fr auto;
+  gap: 8px;
+  min-height: calc(100vh - 74px);
+}
+
+.stream-panel {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: linear-gradient(180deg, #1a0d17, #170912);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-title {
+  padding: 8px 10px;
+  font-size: 2rem;
+  font-weight: 900;
+  line-height: 1;
+  background: linear-gradient(90deg, rgba(255, 56, 95, 0.3), rgba(255, 56, 95, 0));
+}
+
+.rows {
+  overflow: auto;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 6px;
+  align-items: center;
+  padding: 7px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 0.9rem;
+  background: rgba(255, 52, 93, 0.12);
+}
+
+.row:nth-child(odd) {
+  background: rgba(255, 52, 93, 0.22);
+}
+
+.buyer-row {
+  grid-template-columns: 16px 1fr auto auto;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 56, 95, var(--buy-intensity, 0.2)),
+    rgba(255, 56, 95, calc(var(--buy-intensity, 0.2) * 0.3))
+  );
+}
+
+.buyer-row:nth-child(odd) {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 56, 95, calc(var(--buy-intensity, 0.2) * 1.15)),
+    rgba(255, 56, 95, calc(var(--buy-intensity, 0.2) * 0.36))
+  );
+}
+
+.logo {
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
+}
+
+.money {
+  font-weight: 800;
+  color: #ffd7de;
+}
+
+.buyer-btc {
+  color: #fcd2dc;
+  font-weight: 700;
+}
+
+.buyer-row .price {
+  font-weight: 700;
+}
+
+.liq-buy {
+  background: rgba(39, 216, 148, 0.12);
+}
+
+.liq-sell {
+  background: rgba(255, 56, 95, 0.22);
+}
+
+.meta-box {
+  border: 1px solid var(--line);
+  background: #0b101b;
+  border-radius: 4px;
+  padding: 8px;
+  color: var(--muted);
+  display: grid;
+  gap: 5px;
+  font-size: 0.84rem;
+}
+
+@media (max-width: 1080px) {
+  .page-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .stream-col {
+    min-height: auto;
+    grid-template-rows: auto auto auto;
+  }
+}
