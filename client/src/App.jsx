@@ -35,6 +35,11 @@ const MAX_SECOND_CANDLES = 240;
 const MAX_MINUTE_CANDLES = 320;
 const MIN_BUYER_BTC = 0.1;
 const MAX_TOP_BUYERS_FEED = 20;
+const ALERT_BTC_LEVELS = {
+  low: 0.1,
+  mid: 0.5,
+  high: 1.0
+};
 
 function formatPrice(value) {
   if (value === null || value === undefined) {
@@ -68,6 +73,25 @@ function formatBtc(value) {
 
 function buyerKey(row) {
   return `${row.exchangeId}|${row.price}|${row.size}`;
+}
+
+function getVolumeByBtcSize(size) {
+  if (size < ALERT_BTC_LEVELS.low) {
+    return 0;
+  }
+
+  if (size < ALERT_BTC_LEVELS.mid) {
+    const t = (size - ALERT_BTC_LEVELS.low) / (ALERT_BTC_LEVELS.mid - ALERT_BTC_LEVELS.low);
+    return 0.06 + t * 0.07; // 0.10 -> 0.13
+  }
+
+  if (size < ALERT_BTC_LEVELS.high) {
+    const t = (size - ALERT_BTC_LEVELS.mid) / (ALERT_BTC_LEVELS.high - ALERT_BTC_LEVELS.mid);
+    return 0.14 + t * 0.18; // 0.14 -> 0.32
+  }
+
+  const over = Math.min(1, (size - ALERT_BTC_LEVELS.high) / 3); // >=1 BTC louder, capped
+  return 0.34 + over * 0.46; // up to 0.80
 }
 
 function bucketStart(ts, intervalMs) {
@@ -242,7 +266,8 @@ function App() {
   const minuteDataRef = useRef({ candles: [], volumes: [] });
   const previousPriceRef = useRef(null);
   const lastHistoryPollRef = useRef(0);
-  const audioCtxRef = useRef(null);
+  const alertAudioRef = useRef(null);
+  const fallbackAudioCtxRef = useRef(null);
   const lastBuyerAlertAtRef = useRef(0);
   const buyerQueueRef = useRef([]);
   const buyerDrainTimerRef = useRef(null);
@@ -257,17 +282,36 @@ function App() {
   const [liquidations, setLiquidations] = useState([]);
   const [markets, setMarkets] = useState([]);
   const [fearGreed, setFearGreed] = useState(null);
+  const btcTicker = markets.find((item) => item.symbol === "BTC");
+
+  useEffect(() => {
+    alertAudioRef.current = new Audio("/sounds/buyer-ting.wav");
+    alertAudioRef.current.preload = "auto";
+    return () => {
+      if (alertAudioRef.current) {
+        alertAudioRef.current.pause();
+        alertAudioRef.current = null;
+      }
+    };
+  }, []);
 
   const playBuyerTing = (volume) => {
     try {
+      if (alertAudioRef.current) {
+        const clip = alertAudioRef.current.cloneNode();
+        clip.volume = Math.max(0.03, Math.min(1, volume));
+        clip.play().catch(() => {});
+        return;
+      }
+
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       if (!AudioCtx) {
         return;
       }
-      if (!audioCtxRef.current) {
-        audioCtxRef.current = new AudioCtx();
+      if (!fallbackAudioCtxRef.current) {
+        fallbackAudioCtxRef.current = new AudioCtx();
       }
-      const ctx = audioCtxRef.current;
+      const ctx = fallbackAudioCtxRef.current;
       const now = ctx.currentTime;
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
@@ -290,12 +334,13 @@ function App() {
     const now = Date.now();
     const key = buyerKey(row);
 
-    const notional = Number(row.notional) || 0;
+    const btcSize = Number(row.size) || 0;
     if (now - lastBuyerAlertAtRef.current > 300) {
-      const norm = Math.max(0, Math.min(1, (notional - 5000) / 250000));
-      const volume = 0.04 + Math.pow(norm, 0.7) * 0.42;
-      playBuyerTing(volume);
-      lastBuyerAlertAtRef.current = now;
+      const volume = getVolumeByBtcSize(btcSize);
+      if (volume > 0) {
+        playBuyerTing(volume);
+        lastBuyerAlertAtRef.current = now;
+      }
     }
 
     setTopBuyers((prev) => {
@@ -677,8 +722,8 @@ function App() {
         buyerDrainTimerRef.current = null;
       }
       buyerQueueRef.current = [];
-      if (audioCtxRef.current && audioCtxRef.current.state !== "closed") {
-        audioCtxRef.current.close().catch(() => {});
+      if (fallbackAudioCtxRef.current && fallbackAudioCtxRef.current.state !== "closed") {
+        fallbackAudioCtxRef.current.close().catch(() => {});
       }
     };
   }, []);
@@ -690,15 +735,23 @@ function App() {
   return (
     <div className="layout">
       <div className="ticker-strip">
-        <span className={`btc-head btc-${priceTrend}`}>{formatPrice(price)}</span>
+        <div className="btc-block">
+          <span className={`btc-head btc-${priceTrend}`}>BTC: {formatPrice(price)}</span>
+          <b className={(btcTicker?.changePercent ?? 0) >= 0 ? "green" : "red"}>
+            {(btcTicker?.changePercent ?? 0) >= 0 ? "+" : ""}
+            {(btcTicker?.changePercent ?? 0).toFixed(2)}%
+          </b>
+        </div>
         {markets.map((m) => (
-          <span className="ticker-item" key={m.symbol}>
+          m.symbol === "BTC" ? null : (
+          <span className="ticker-item" key={`${m.marketType || "m"}-${m.symbol}`}>
             {m.symbol}: {formatPrice(m.price)}{" "}
             <b className={m.changePercent >= 0 ? "green" : "red"}>
               {m.changePercent >= 0 ? "+" : ""}
               {m.changePercent.toFixed(2)}%
             </b>
           </span>
+          )
         ))}
       </div>
 

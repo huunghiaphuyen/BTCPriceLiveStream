@@ -26,10 +26,13 @@ body {
 
 .layout {
   width: 100%;
+  max-width: 1920px;
+  margin: 0 auto;
+  min-height: 100vh;
 }
 
 .ticker-strip {
-  height: 58px;
+  height: 64px;
   display: flex;
   align-items: center;
   gap: 20px;
@@ -39,6 +42,21 @@ body {
   background: #010204;
   font-weight: 700;
   white-space: nowrap;
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.btc-block {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 12px;
+  flex: 0 0 auto;
+  padding-right: 14px;
+  border-right: 1px solid #1a2233;
+}
+
+.ticker-strip::-webkit-scrollbar {
+  display: none;
 }
 
 .ticker-item {
@@ -72,16 +90,17 @@ body {
 
 .page-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
-  gap: 8px;
-  padding: 8px;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 10px;
+  padding: 10px;
+  height: calc(100vh - 64px);
 }
 
 .charts-col {
   display: grid;
   grid-template-rows: 1fr 1fr;
-  gap: 8px;
-  min-height: calc(100vh - 74px);
+  gap: 10px;
+  min-height: 0;
 }
 
 .chart-card {
@@ -89,7 +108,9 @@ body {
   border: 1px solid var(--line);
   background: var(--panel);
   border-radius: 4px;
-  padding: 8px;
+  padding: 10px;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .chart-label {
@@ -139,9 +160,9 @@ body {
 
 .stream-col {
   display: grid;
-  grid-template-rows: 1fr 1fr auto;
-  gap: 8px;
-  min-height: calc(100vh - 74px);
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 10px;
+  min-height: 0;
 }
 
 .stream-panel {
@@ -163,6 +184,13 @@ body {
 
 .rows {
   overflow: auto;
+  min-height: 0;
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.rows::-webkit-scrollbar {
+  display: none;
 }
 
 .row {
@@ -181,7 +209,9 @@ body {
 }
 
 .buyer-row {
-  grid-template-columns: 16px 1fr auto auto;
+  grid-template-columns: 20px 110px 92px 110px;
+  justify-items: center;
+  text-align: center;
   background: linear-gradient(
     90deg,
     rgba(255, 56, 95, var(--buy-intensity, 0.2)),
@@ -201,6 +231,7 @@ body {
   width: 14px;
   height: 14px;
   object-fit: contain;
+  justify-self: center;
 }
 
 .money {
@@ -215,6 +246,9 @@ body {
 
 .buyer-row .price {
   font-weight: 700;
+  width: 100%;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .liq-buy {
@@ -236,13 +270,43 @@ body {
   font-size: 0.84rem;
 }
 
+@media (max-width: 1920px) and (max-height: 1080px) {
+  .ticker-strip {
+    height: 58px;
+  }
+
+  .page-grid {
+    height: calc(100vh - 58px);
+    grid-template-columns: minmax(0, 1fr) 330px;
+    gap: 8px;
+    padding: 8px;
+  }
+
+  .panel-title {
+    font-size: 1.7rem;
+  }
+
+  .chart-label {
+    font-size: 2.5rem;
+  }
+}
+
 @media (max-width: 1080px) {
   .page-grid {
     grid-template-columns: 1fr;
+    height: auto;
   }
 
   .stream-col {
     min-height: auto;
     grid-template-rows: auto auto auto;
+  }
+
+  .chart-card {
+    min-height: 46vh;
+  }
+
+  .panel-title {
+    font-size: 1.3rem;
   }
 }

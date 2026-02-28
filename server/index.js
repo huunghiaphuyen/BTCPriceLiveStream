@@ -15,12 +15,23 @@ const TOP_BUYERS_LIMIT = 12;
 const MIN_TOP_BUYER_BTC = 0.1;
 const MAX_LIQUIDATIONS = 30;
 const TOP_BUYERS_REFRESH_MS = 3_000;
-const MARKETS_REFRESH_MS = 5_000;
+const MARKETS_REFRESH_MS = 15_000;
 const FEAR_REFRESH_MS = 60_000;
 const RECONNECT_BASE_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 15_000;
 const HISTORY_SYNC_MS = 15_000;
-const MARKET_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "ADAUSDT"];
+const NASDAQ_100_SYMBOLS = [
+  "AAPL","MSFT","NVDA","AMZN","GOOGL","GOOG","META","TSLA","AVGO","COST",
+  "NFLX","ASML","AMD","PEP","ADBE","CSCO","TMUS","LIN","TXN","QCOM",
+  "INTU","AMGN","CMCSA","HON","AMAT","INTC","BKNG","GILD","ISRG","ADP",
+  "VRTX","SBUX","REGN","ADI","PANW","LRCX","MU","MDLZ","PYPL","SNPS",
+  "KLAC","MELI","CDNS","MNST","CSX","ORLY","MAR","CTAS","NXPI","ABNB",
+  "CRWD","KDP","AEP","PAYX","PCAR","MRVL","FTNT","ROST","AZN","WDAY",
+  "ODFL","CHTR","DLTR","MCHP","IDXX","CPRT","EXC","EA","FANG","GEHC",
+  "BIIB","XEL","FAST","CSGP","KHC","VRSK","CTSH","GFS","BKR","ON",
+  "TEAM","DDOG","ANSS","TTWO","WBD","LULU","ZS","MDB","CCEP","CDW",
+  "DXCM","TTD","ILMN","ARM","SMCI","SIRI","PDD","PYPL","AXON","ROP"
+];
 
 const EXCHANGES = [
   {
@@ -328,24 +339,71 @@ function startTopBuyersSync() {
 
 async function refreshMarkets() {
   try {
-    const params = new URLSearchParams({ symbols: JSON.stringify(MARKET_SYMBOLS) });
-    const res = await fetch(`https://api.binance.com/api/v3/ticker/24hr?${params.toString()}`);
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
+    const cryptoRes = await fetch("https://api.binance.com/api/v3/ticker/24hr");
+    if (!cryptoRes.ok) {
+      throw new Error(`Binance ticker HTTP ${cryptoRes.status}`);
     }
-    const payload = await res.json();
-    if (!Array.isArray(payload)) {
-      return;
+    const cryptoPayload = await cryptoRes.json();
+    const stableBases = new Set(["USDT", "USDC", "FDUSD", "BUSD", "TUSD", "DAI", "USDP"]);
+    const cryptoRows = Array.isArray(cryptoPayload)
+      ? cryptoPayload
+          .filter((item) => String(item.symbol || "").endsWith("USDT"))
+          .map((item) => {
+            const symbol = String(item.symbol || "");
+            const base = symbol.replace("USDT", "");
+            return {
+              symbol: base,
+              price: toNumber(item.lastPrice),
+              changePercent: toNumber(item.priceChangePercent),
+              changeValue: toNumber(item.priceChange),
+              quoteVolume: toNumber(item.quoteVolume),
+              marketType: "crypto"
+            };
+          })
+          .filter((item) => item.symbol && !stableBases.has(item.symbol) && item.price > 0)
+          .sort((a, b) => b.quoteVolume - a.quoteVolume)
+          .slice(0, 10)
+          .map(({ quoteVolume, ...rest }) => rest)
+      : [];
+
+    const uniqueStocks = [...new Set(NASDAQ_100_SYMBOLS)];
+    const stockRows = [];
+    const chunkSize = 20;
+    for (let i = 0; i < uniqueStocks.length; i += chunkSize) {
+      const chunk = uniqueStocks.slice(i, i + chunkSize).map((s) => `${s.toLowerCase()}.us`);
+      const stockRes = await fetch(
+        `https://stooq.com/q/l/?s=${chunk.join("+")}&f=sd2t2ohlcv&h&e=csv`
+      );
+      if (!stockRes.ok) {
+        throw new Error(`Stooq HTTP ${stockRes.status}`);
+      }
+      const csv = await stockRes.text();
+      const lines = csv.split(/\r?\n/).filter(Boolean).slice(1);
+      for (const line of lines) {
+        const cols = line.split(",");
+        if (cols.length < 8) {
+          continue;
+        }
+        const symbolRaw = String(cols[0] || "").toUpperCase();
+        const open = toNumber(cols[3]);
+        const close = toNumber(cols[6]);
+        if (!symbolRaw || open <= 0 || close <= 0) {
+          continue;
+        }
+        const symbol = symbolRaw.replace(".US", "");
+        const changeValue = close - open;
+        const changePercent = (changeValue / open) * 100;
+        stockRows.push({
+          symbol,
+          price: close,
+          changePercent,
+          changeValue,
+          marketType: "stock"
+        });
+      }
     }
 
-    markets = payload
-      .map((item) => ({
-        symbol: item.symbol.replace("USDT", ""),
-        price: toNumber(item.lastPrice),
-        changePercent: toNumber(item.priceChangePercent),
-        changeValue: toNumber(item.priceChange)
-      }))
-      .filter((item) => item.price > 0);
+    markets = [...cryptoRows, ...stockRows].filter((item) => item.symbol && item.price > 0);
 
     io.emit("markets", { updatedAt: Date.now(), rows: markets });
   } catch (error) {
