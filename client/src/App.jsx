@@ -33,6 +33,7 @@ Chart.register(
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:3000";
 const MAX_SECOND_CANDLES = 240;
 const MAX_MINUTE_CANDLES = 320;
+const SECOND_CHART_UPDATE_MS = 10_000;
 const MIN_BUYER_BTC = 0.1;
 const MAX_TOP_BUYERS_FEED = 20;
 const ALERT_BTC_LEVELS = {
@@ -499,19 +500,23 @@ function App() {
         return;
       }
       applyPrice(trade.price, trade.ts);
+      const prevBucket = secondDataRef.current.candles[secondDataRef.current.candles.length - 1]?.x;
       secondDataRef.current.candles = upsertCandleFromTrade(
         secondDataRef.current.candles,
         trade,
-        1_000,
+        SECOND_CHART_UPDATE_MS,
         MAX_SECOND_CANDLES
       );
       secondDataRef.current.volumes = upsertVolume(
         secondDataRef.current.volumes,
         trade,
-        1_000,
+        SECOND_CHART_UPDATE_MS,
         MAX_SECOND_CANDLES
       );
-      renderSecondChart();
+      const nextBucket = secondDataRef.current.candles[secondDataRef.current.candles.length - 1]?.x;
+      if (!prevBucket || prevBucket !== nextBucket) {
+        renderSecondChart();
+      }
 
       minuteDataRef.current.candles = upsertCandleFromTrade(
         minuteDataRef.current.candles,
@@ -630,10 +635,14 @@ function App() {
           secondDataRef.current.candles = upsertCandleFromTrade(
             secondDataRef.current.candles,
             syntheticTrade,
-            1_000,
+            SECOND_CHART_UPDATE_MS,
             MAX_SECOND_CANDLES
           );
-          renderSecondChartFallback();
+          const prevBucket = secondDataRef.current.candles[secondDataRef.current.candles.length - 2]?.x;
+          const nextBucket = secondDataRef.current.candles[secondDataRef.current.candles.length - 1]?.x;
+          if (!prevBucket || prevBucket !== nextBucket) {
+            renderSecondChartFallback();
+          }
         }
       } catch (_error) {
         // no-op
@@ -775,7 +784,7 @@ function App() {
 
         <aside className="stream-col">
           <div className="stream-panel">
-            <div className="panel-title">TOP BUYERS (&gt;= 0.1 BTC)</div>
+            <div className="panel-title">TOP BUYERS</div>
             <div className="rows">
               {topBuyers.slice(0, 12).map((row, idx) => {
                 const intensity = topMaxNotional > 0 ? Number(row.notional) / topMaxNotional : 0;
